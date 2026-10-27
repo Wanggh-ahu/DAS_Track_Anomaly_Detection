@@ -1,0 +1,167 @@
+# =============================================================================
+# DAS Track Anomaly Detection - default experiment configuration
+# All relative paths are resolved from the project root.
+# =============================================================================
+
+project:
+  name: DAS_Track_Anomaly_Detection
+  seed: 42
+  device: auto              # auto | cpu | cuda
+
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  synthetic_dir: data/synthetic
+  outputs_dir: outputs
+  checkpoint_dir: outputs/checkpoints
+  log_dir: outputs/logs
+  prediction_dir: outputs/predictions
+
+data:
+  # Acquisition / geometry -------------------------------------------------
+  sampling_rate_hz: 1000.0
+  spatial_spacing_m: 0.5
+  bandpass_hz: [5.0, 200.0]
+  filter_order: 4
+  common_mode_window: 5       # Cw: spatial common-mode removal window (channels)
+  spatial_window_cw: 5        # Cw: spatial context window used by features/models
+  time_window_tw: 128         # Tw: samples per analysis window
+  hdf5:
+    dataset_key: null         # null => auto-detect the largest 2-D dataset
+    orientation: auto         # auto | channels_time | time_channels
+  pass_detection:
+    frame_seconds: 0.05
+    energy_percentile: 90.0
+    threshold_sigma: 2.0
+    min_duration_s: 0.30
+    merge_gap_s: 1.00       # bridge gaps so the whole crossing is one event
+    pad_s: 0.60             # keep the defect's ring inside the tiled windows
+  preprocessing:
+    normalize: true
+    normalization: robust     # robust | zscore | none
+    clip_sigma: 6.0
+    save_dtype: float32
+
+training:
+  batch_size: 64
+  lr: 0.001
+  epochs: 50
+  weight_decay: 0.0001
+  num_workers: 0
+  validation_split: 0.15
+  early_stopping_patience: 10
+  grad_clip_norm: 1.0
+  amp: false
+  shuffle: true
+
+# -----------------------------------------------------------------------------
+# Model selection
+# `model.name` is the default used by scripts/train.py. Override it with
+# `python scripts/train.py --model pca` without editing this file.
+# -----------------------------------------------------------------------------
+model:
+  name: stae_convlstm
+  candidates:
+    - pca
+    - energy
+    - isolation_forest
+    - ae_1d
+    - stae_convlstm
+    - spatial_masked_ae
+  params:
+    pca:
+      n_components: 32
+      whiten: false
+    energy:
+      topk_channels: 3
+      statistic: mean
+    isolation_forest:
+      n_estimators: 200
+      contamination: 0.02
+      random_state: 42
+    ae_1d:
+      base_channels: 16
+      latent_channels: 8
+      kernel_size: 7
+      dropout: 0.10
+    stae_convlstm:
+      seq_len: 8
+      hidden_channels: 16
+      latent_channels: 16
+      kernel_size: 3
+      dropout: 0.10
+    spatial_masked_ae:
+      base_channels: 16
+      latent_channels: 32
+      kernel_size: 3
+      mask_ratio: 0.25          # width of the hidden band at training/inference
+      n_masks: 6
+      memory_slots: 64
+      memory_temperature: 0.20
+      entropy_weight: 0.0005
+      dropout: 0.10
+
+evaluation:
+  threshold_method: conformal   # conformal | percentile | fixed
+  conformal_alpha: 0.05         # guaranteed false-alarm rate (needs n >= 1/alpha - 1)
+  calibration_split: 0.30       # fraction of normal passes held out for calibration
+  threshold_percentile: 99.0    # used when threshold_method=percentile
+  fixed_threshold: null
+  topk_channels: 3
+  localization_tolerance_channels: 2
+  source_score_aggregation: mean    # fuse window scores for pass-level detection
+  pass_threshold_margin: 0.01       # pass threshold = max normal pass score * (1+m)
+  localization_aggregation: mean    # fuse windows of one pass: vote | mean | median | max
+  localization_detected_only: false # true => fuse only windows above threshold
+  localization_interval:
+    threshold_mad: 1.75            # threshold = median + k * MAD
+    merge_gap: 2                   # bridge up to N weak channels
+    min_width: 1
+    smoothing_sigma: 1.0
+    max_intervals: 3               # report up to N defect intervals per pass
+  batch_size: 64
+  metrics: [roc_auc, f1, false_alarm_rate, localization_error, pass_detection, interval_localization]
+  aggregate_method: median       # multi-pass fusion: mean | median | max
+
+simulation:
+  n_channels: 96
+  channel_spacing_m: 0.5
+  sampling_rate_hz: 1000.0
+  duration_s: 8.0
+  speed_mps: 20.0
+  axle_spacing_m: [2.5, 14.0, 2.5, 9.0]
+  noise_std: 0.02
+  train_files: 10
+  test_files: 16
+  anomaly_probability: 0.5
+  seed: 2024
+
+  # ------------------------------------------------------------ defect physics
+  # impact    : short broadband transient excited by each axle crossing
+  # resonance : high-frequency decaying ring excited by each axle crossing
+  # mixed     : both mechanisms superimposed
+  # none      : disable injection
+  anomaly_type: mixed
+  snr_db: -6.0                # local SNR of the defect at the detector input
+  anomaly_min_width_channels: 1
+  anomaly_max_width_channels: 4
+  impact_duration_s: 0.018
+  impact_decay_s: 0.010
+  impact_carriers_hz: [70.0, 115.0, 165.0]
+  resonance_frequency_hz: 120.0
+  resonance_decay_s: 0.075
+  resonance_harmonic_ratio: 0.35
+  resonance_harmonic_multiplier: 1.45
+
+  # SNR is measured after these filters (mirror `data.*`) so the requested
+  # value describes what the model actually sees.
+  snr_reference: processed
+  bandpass_hz: [5.0, 200.0]
+  filter_order: 4
+  common_mode_window: 5
+
+logging:
+  level: INFO
+  save_config_snapshot: true
+  log_metrics_jsonl: true

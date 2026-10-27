@@ -1,0 +1,164 @@
+# =============================================================================
+# SNR sensitivity benchmark (generated from exp_default.yaml)
+#
+# 60 normal training passes, 48 test passes, 35% of the normal passes held
+# out for conformal calibration.  scripts/run_snr_sweep.py rewrites the paths
+# and simulation.snr_db for every point of the sweep.
+# =============================================================================
+project:
+  name: DAS_SNR_Sweep
+  seed: 42
+  device: auto
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/sweep/processed
+  synthetic_dir: data/sweep/synthetic
+  outputs_dir: outputs
+  checkpoint_dir: outputs/snr_sweep/checkpoints
+  log_dir: outputs/snr_sweep/logs
+  prediction_dir: outputs/snr_sweep/predictions
+data:
+  sampling_rate_hz: 1000.0
+  spatial_spacing_m: 0.5
+  bandpass_hz:
+  - 5.0
+  - 200.0
+  filter_order: 4
+  common_mode_window: 5
+  spatial_window_cw: 5
+  time_window_tw: 128
+  hdf5:
+    dataset_key: null
+    orientation: auto
+  pass_detection:
+    frame_seconds: 0.05
+    energy_percentile: 90.0
+    threshold_sigma: 2.0
+    min_duration_s: 0.3
+    merge_gap_s: 1.0
+    pad_s: 0.6
+  preprocessing:
+    normalize: true
+    normalization: robust
+    clip_sigma: 6.0
+    save_dtype: float32
+training:
+  batch_size: 64
+  lr: 0.001
+  epochs: 40
+  weight_decay: 0.0001
+  num_workers: 0
+  validation_split: 0.15
+  early_stopping_patience: 8
+  grad_clip_norm: 1.0
+  amp: false
+  shuffle: true
+model:
+  name: stae_convlstm
+  candidates:
+  - pca
+  - energy
+  - isolation_forest
+  - ae_1d
+  - stae_convlstm
+  - spatial_masked_ae
+  params:
+    pca:
+      n_components: 32
+      whiten: false
+    energy:
+      topk_channels: 3
+      statistic: mean
+    isolation_forest:
+      n_estimators: 200
+      contamination: 0.02
+      random_state: 42
+    ae_1d:
+      base_channels: 16
+      latent_channels: 8
+      kernel_size: 7
+      dropout: 0.1
+    stae_convlstm:
+      seq_len: 8
+      hidden_channels: 16
+      latent_channels: 16
+      kernel_size: 3
+      dropout: 0.1
+    spatial_masked_ae:
+      base_channels: 16
+      latent_channels: 32
+      kernel_size: 3
+      mask_ratio: 0.25
+      n_masks: 6
+      memory_slots: 64
+      memory_temperature: 0.20
+      entropy_weight: 0.0005
+      dropout: 0.1
+evaluation:
+  threshold_method: conformal
+  conformal_alpha: 0.05
+  calibration_split: 0.35
+  threshold_percentile: 99.0
+  fixed_threshold: null
+  topk_channels: 3
+  localization_tolerance_channels: 2
+  source_score_aggregation: mean
+  pass_threshold_margin: 0.01
+  localization_aggregation: mean
+  localization_detected_only: false
+  localization_interval:
+    threshold_mad: 1.75
+    merge_gap: 2
+    min_width: 1
+    smoothing_sigma: 1.0
+    max_intervals: 3
+  batch_size: 64
+  metrics:
+  - roc_auc
+  - f1
+  - false_alarm_rate
+  - localization_error
+  - pass_detection
+  - interval_localization
+  aggregate_method: median
+simulation:
+  n_channels: 96
+  channel_spacing_m: 0.5
+  sampling_rate_hz: 1000.0
+  duration_s: 8.0
+  speed_mps: 20.0
+  axle_spacing_m:
+  - 2.5
+  - 14.0
+  - 2.5
+  - 9.0
+  noise_std: 0.02
+  train_files: 60
+  test_files: 48
+  anomaly_probability: 0.5
+  seed: 2024
+  anomaly_type: mixed
+  snr_db: -6.0
+  anomaly_min_width_channels: 1
+  anomaly_max_width_channels: 4
+  impact_duration_s: 0.018
+  impact_decay_s: 0.01
+  impact_carriers_hz:
+  - 70.0
+  - 115.0
+  - 165.0
+  resonance_frequency_hz: 120.0
+  resonance_decay_s: 0.075
+  resonance_harmonic_ratio: 0.35
+  resonance_harmonic_multiplier: 1.45
+  snr_reference: processed
+  bandpass_hz:
+  - 5.0
+  - 200.0
+  filter_order: 4
+  common_mode_window: 5
+logging:
+  level: INFO
+  save_config_snapshot: true
+  log_metrics_jsonl: true

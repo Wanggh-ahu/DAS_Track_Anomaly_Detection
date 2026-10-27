@@ -1,0 +1,63 @@
+"""Scoring and evaluation utilities."""
+
+from .conformal import (
+    ConformalThreshold,
+    conformal_threshold_report,
+    minimum_calibration_size,
+    split_conformal_quantile,
+)
+from .metrics import (
+    aggregate_channel_profile,
+    compute_f1,
+    compute_false_alarm_rate,
+    compute_localization_error,
+    compute_roc_auc,
+    compute_roc_curve,
+    detection_metrics_by_source,
+    evaluate_all,
+    extract_anomaly_intervals,
+    find_best_f1_threshold,
+    interval_metrics_by_source,
+    localization_metrics_by_source,
+    localization_metrics_from_scores,
+    pass_profile_scores,
+)
+from .scoring import (
+    AnomalyScorer,
+    MultiPassAccumulator,
+    ScoreResult,
+    SpatialNormalizer,
+    accumulate_multi_pass,
+    aggregate_channel_scores,
+    reconstruction_residual,
+    select_threshold,
+)
+
+__all__ = [
+    "reconstruction_residual",
+    "aggregate_channel_profile",
+    "SpatialNormalizer",
+    "aggregate_channel_scores",
+    "AnomalyScorer",
+    "ScoreResult",
+    "MultiPassAccumulator",
+    "accumulate_multi_pass",
+    "select_threshold",
+    "ConformalThreshold",
+    "split_conformal_quantile",
+    "conformal_threshold_report",
+    "minimum_calibration_size",
+    "compute_roc_auc",
+    "compute_roc_curve",
+    "compute_f1",
+    "compute_false_alarm_rate",
+    "compute_localization_error",
+    "detection_metrics_by_source",
+    "localization_metrics_from_scores",
+    "localization_metrics_by_source",
+    "extract_anomaly_intervals",
+    "interval_metrics_by_source",
+    "pass_profile_scores",
+    "evaluate_all",
+    "find_best_f1_threshold",
+]

@@ -1,0 +1,12 @@
+torch
+numpy
+scipy
+PyWavelets
+h5py
+pyyaml
+tqdm
+scikit-learn
+matplotlib
+seaborn
+pandas
+jupyterlab

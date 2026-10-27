@@ -1,0 +1,21 @@
+# Python 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境与环境变量
+venv/
+env/
+.env
+
+# Jupyter Notebook 缓存
+.ipynb_checkpoints/
+
+# IDE 配置文件
+.idea/
+.vscode/
+*.swp
+
+# 项目特定数据与输出（必须忽略，防止大文件撑爆 GitHub）
+data/
+outputs/
