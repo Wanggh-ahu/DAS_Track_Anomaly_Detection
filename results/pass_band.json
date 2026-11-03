@@ -1,0 +1,119 @@
+{
+  "morph_j70_s5": {
+    "seed_0": {
+      "n_passes": 48,
+      "n_pos_passes": 29,
+      "n_bands": 5,
+      "train_passes": 60,
+      "bands_mean": 0.7041742286751361,
+      "bands_max": 0.6315789473684211,
+      "per_pass_raw": 0.3720508166969147,
+      "per_pass_cal": 0.6660617059891107,
+      "per_pass_cal_band_hist": {
+        "0": 2,
+        "1": 10,
+        "2": 20,
+        "3": 6,
+        "4": 10
+      },
+      "per_pass_cal_channel_auc": 0.9062878455462922,
+      "per_pass_channel_cal": 0.5970961887477315,
+      "per_pass_oracle": 0.6569872958257713,
+      "oracle_channel_auc": 0.9213514699429575,
+      "best_fixed_band": 0,
+      "fixed_best_pooled": 0.48275862068965514
+    },
+    "seed_1": {
+      "n_passes": 48,
+      "n_pos_passes": 29,
+      "n_bands": 5,
+      "train_passes": 60,
+      "bands_mean": 0.6878402903811253,
+      "bands_max": 0.6406533575317604,
+      "per_pass_raw": 0.39201451905626133,
+      "per_pass_cal": 0.5753176043557169,
+      "per_pass_cal_band_hist": {
+        "0": 3,
+        "1": 10,
+        "2": 18,
+        "3": 9,
+        "4": 8
+      },
+      "per_pass_cal_channel_auc": 0.8915138218516894,
+      "per_pass_channel_cal": 0.5843920145190563,
+      "per_pass_oracle": 0.5698729582577132,
+      "oracle_channel_auc": 0.9002632733655113,
+      "best_fixed_band": 0,
+      "fixed_best_pooled": 0.500907441016334
+    },
+    "seed_2": {
+      "n_passes": 48,
+      "n_pos_passes": 28,
+      "n_bands": 5,
+      "train_passes": 60,
+      "bands_mean": 0.6982142857142858,
+      "bands_max": 0.6196428571428572,
+      "per_pass_raw": 0.3696428571428571,
+      "per_pass_cal": 0.5125,
+      "per_pass_cal_band_hist": {
+        "0": 4,
+        "1": 8,
+        "2": 17,
+        "3": 8,
+        "4": 11
+      },
+      "per_pass_cal_channel_auc": 0.8702576754385964,
+      "per_pass_channel_cal": 0.5946428571428571,
+      "per_pass_oracle": 0.5839285714285714,
+      "oracle_channel_auc": 0.8867324561403509,
+      "best_fixed_band": 0,
+      "fixed_best_pooled": 0.4714285714285714
+    },
+    "seed_3": {
+      "n_passes": 48,
+      "n_pos_passes": 27,
+      "n_bands": 5,
+      "train_passes": 60,
+      "bands_mean": 0.6843033509700176,
+      "bands_max": 0.6031746031746033,
+      "per_pass_raw": 0.3562610229276896,
+      "per_pass_cal": 0.4567901234567901,
+      "per_pass_cal_band_hist": {
+        "0": 1,
+        "1": 11,
+        "2": 15,
+        "3": 11,
+        "4": 10
+      },
+      "per_pass_cal_channel_auc": 0.8638945542572861,
+      "per_pass_channel_cal": 0.566137566137566,
+      "per_pass_oracle": 0.5238095238095238,
+      "oracle_channel_auc": 0.8870489678440044,
+      "best_fixed_band": 0,
+      "fixed_best_pooled": 0.44797178130511467
+    },
+    "seed_4": {
+      "n_passes": 48,
+      "n_pos_passes": 27,
+      "n_bands": 5,
+      "train_passes": 60,
+      "bands_mean": 0.7001763668430334,
+      "bands_max": 0.599647266313933,
+      "per_pass_raw": 0.36155202821869487,
+      "per_pass_cal": 0.49559082892416223,
+      "per_pass_cal_band_hist": {
+        "0": 2,
+        "1": 9,
+        "2": 15,
+        "3": 11,
+        "4": 11
+      },
+      "per_pass_cal_channel_auc": 0.869746297390542,
+      "per_pass_channel_cal": 0.5820105820105821,
+      "per_pass_oracle": 0.5696649029982364,
+      "oracle_channel_auc": 0.8977088614833311,
+      "best_fixed_band": 0,
+      "fixed_best_pooled": 0.47971781305114636
+    }
+  }
+}
