@@ -496,6 +496,7 @@ _SUPPORTED_MODELS = {
     "bandselect",
     "envspec",
     "tftraj",
+    "spatial",
     "isolation_forest",
     "ae_1d",
     "stae_convlstm",
@@ -543,6 +544,10 @@ def _load_model_class(name: str) -> type[BaseModel]:
         from .timescale import TrajectoryBaseline
 
         return TrajectoryBaseline
+    if name == "spatial":
+        from .spatial_profile import SpatialProfileBaseline
+
+        return SpatialProfileBaseline
     if name == "isolation_forest":
         from .statistical import IsolationForestBaseline
 

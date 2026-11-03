@@ -15,6 +15,7 @@ from .spatial_masked_ae import SpatialMaskedAE
 from .stae_convlstm import STAEConvLSTM
 from .statistical import IsolationForestBaseline, PCABaseline
 from .stft_ae import STFTLogMagnitudeAE
+from .spatial_profile import SpatialProfileBaseline
 from .timescale import EnvelopeSpectrumBaseline, TrajectoryBaseline
 
 MODEL_REGISTRY = {
@@ -26,6 +27,7 @@ MODEL_REGISTRY = {
     "bandselect": LoudestBandBaseline,
     "envspec": EnvelopeSpectrumBaseline,
     "tftraj": TrajectoryBaseline,
+    "spatial": SpatialProfileBaseline,
     "isolation_forest": IsolationForestBaseline,
     "ae_1d": AE1D,
     "stae_convlstm": STAEConvLSTM,
@@ -46,6 +48,7 @@ __all__ = [
     "LoudestBandBaseline",
     "EnvelopeSpectrumBaseline",
     "TrajectoryBaseline",
+    "SpatialProfileBaseline",
     "IsolationForestBaseline",
     "AE1D",
     "STAEConvLSTM",
