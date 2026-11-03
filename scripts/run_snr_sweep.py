@@ -48,10 +48,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-DEFAULT_MODELS = ("pca", "energy", "ae_1d", "spatial_masked_ae")
+DEFAULT_MODELS = ("pca", "energy", "bandpass", "filterbank", "ae_1d", "spatial_masked_ae", "stft_ae")
 MODEL_LABELS = {
     "pca": "PCA reconstruction",
     "energy": "Energy threshold",
+    "bandpass": "Band-pass 80-160 Hz",
+    "filterbank": "Filterbank (5 bands)",
     "isolation_forest": "Isolation Forest",
     "ae_1d": "1-D autoencoder",
     "stae_convlstm": "STAE-ConvLSTM",
@@ -60,6 +62,8 @@ MODEL_LABELS = {
 MODEL_STYLES = {
     "pca": {"color": "#1f77b4", "marker": "o", "linestyle": "-"},
     "energy": {"color": "#7f7f7f", "marker": "s", "linestyle": "--"},
+    "bandpass": {"color": "#ff7f0e", "marker": "P", "linestyle": "--"},
+    "filterbank": {"color": "#8c564b", "marker": "X", "linestyle": "--"},
     "isolation_forest": {"color": "#bcbd22", "marker": "^", "linestyle": "-."},
     "ae_1d": {"color": "#2ca02c", "marker": "D", "linestyle": "-"},
     "stae_convlstm": {"color": "#9467bd", "marker": "v", "linestyle": "-"},
@@ -120,6 +124,7 @@ def patch_config(
     workdir: Path,
     snr: float,
     seed: int,
+    jitter: float | None = None,
 ) -> dict[str, Any]:
     config = copy.deepcopy(base)
     config.setdefault("paths", {})
@@ -134,6 +139,10 @@ def patch_config(
     )
     config.setdefault("simulation", {})["snr_db"] = float(snr)
     config["simulation"]["seed"] = int(seed)
+    if jitter is not None:
+        # Per-pass frequency jitter turns a fixed defect morphology into a
+        # heterogeneous one; 0.0 reproduces the nominal spectrum exactly.
+        config["simulation"]["defect_frequency_jitter"] = float(jitter)
     return config
 
 
@@ -147,12 +156,15 @@ def parse_metrics(path: Path) -> dict[str, Any]:
     localization = metrics.get("localization", {}) or {}
     return {
         "window_auc": _as_float(metrics.get("roc_auc")),
+        "channel_auc": _as_float(metrics.get("channel_auc")),
         "window_f1": _as_float(metrics.get("f1")),
+        "window_recall": _as_float(metrics.get("recall")),
         "false_alarm_rate": _as_float(metrics.get("false_alarm_rate")),
         "pass_auc": _as_float(pass_detection.get("roc_auc")),
         "pass_f1": _as_float(pass_detection.get("f1")),
         "profile_auc": _as_float(profile_detection.get("roc_auc")),
         "profile_f1": _as_float(profile_detection.get("f1")),
+        "profile_recall": _as_float(profile_detection.get("recall")),
         "profile_far": _as_float(profile_detection.get("false_alarm_rate")),
         "n_test_sources": int(pass_detection.get("n_sources", 0) or 0),
         "interval_f1": _as_float(intervals.get("interval_f1")),
@@ -178,6 +190,7 @@ def evaluate_point(
     models: Sequence[str],
     epochs: int | None,
     skip_existing: bool,
+    reuse_checkpoints: bool = False,
 ) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
     python = sys.executable
@@ -210,22 +223,29 @@ def evaluate_point(
             except (OSError, json.JSONDecodeError):
                 pass
 
-        train_cmd = [
-            python,
-            str(PROJECT_ROOT / "scripts" / "train.py"),
-            "--config",
-            str(config_path),
-            "--model",
-            model,
-        ]
-        if epochs is not None:
-            train_cmd += ["--epochs", str(epochs)]
-        code, tail = run_command(
-            train_cmd, workdir / "logs" / f"train_{model}.txt"
+        checkpoint_exists = any(
+            (workdir / "checkpoints" / f"{model}{suffix}").is_file()
+            for suffix in (".pt", ".pth", ".pkl")
         )
-        if code != 0:
-            results[model] = {"error": f"train failed: {tail[-400:]}"}
-            continue
+        if reuse_checkpoints and checkpoint_exists:
+            print(f"    {model}: reusing checkpoint", flush=True)
+        else:
+            train_cmd = [
+                python,
+                str(PROJECT_ROOT / "scripts" / "train.py"),
+                "--config",
+                str(config_path),
+                "--model",
+                model,
+            ]
+            if epochs is not None:
+                train_cmd += ["--epochs", str(epochs)]
+            code, tail = run_command(
+                train_cmd, workdir / "logs" / f"train_{model}.txt"
+            )
+            if code != 0:
+                results[model] = {"error": f"train failed: {tail[-400:]}"}
+                continue
 
         eval_cmd = [
             python,
@@ -259,12 +279,16 @@ def aggregate_repeats(
         errors = [entry.get("error") for entry in entries if entry.get("error")]
         numeric_keys = [
             "window_auc",
+            "channel_auc",
             "pass_auc",
             "profile_auc",
             "window_f1",
             "pass_f1",
             "profile_f1",
+            "window_recall",
+            "profile_recall",
             "false_alarm_rate",
+            "profile_far",
             "interval_f1",
             "interval_iou",
             "interval_coverage",
@@ -301,7 +325,7 @@ def plot_sweep(
     snr_values = sorted(results.keys())
     figure, axes = plt.subplots(1, 3, figsize=(16.5, 5.0), constrained_layout=True)
     panels = [
-        ("window_auc", "Window-level ROC AUC"),
+        ("channel_auc", "Channel-level ROC AUC (active windows)"),
         ("profile_auc", "Pass-level ROC AUC (time-integrated)"),
         ("interval_f1", "Interval localisation F1"),
     ]
@@ -385,12 +409,18 @@ def write_summary(
                 "model",
                 "window_auc",
                 "window_auc_std",
+                "channel_auc",
+                "channel_auc_std",
                 "pass_auc",
                 "pass_auc_std",
                 "profile_auc",
                 "profile_auc_std",
                 "window_f1",
+                "window_recall",
                 "false_alarm_rate",
+                "profile_f1",
+                "profile_recall",
+                "profile_far",
                 "interval_f1",
                 "interval_iou",
                 "interval_coverage",
@@ -407,12 +437,18 @@ def write_summary(
                         model,
                         _fmt(entry.get("window_auc")),
                         _fmt(entry.get("window_auc_std")),
+                        _fmt(entry.get("channel_auc")),
+                        _fmt(entry.get("channel_auc_std")),
                         _fmt(entry.get("pass_auc")),
                         _fmt(entry.get("pass_auc_std")),
                         _fmt(entry.get("profile_auc")),
                         _fmt(entry.get("profile_auc_std")),
                         _fmt(entry.get("window_f1")),
+                        _fmt(entry.get("window_recall")),
                         _fmt(entry.get("false_alarm_rate")),
+                        _fmt(entry.get("profile_f1")),
+                        _fmt(entry.get("profile_recall")),
+                        _fmt(entry.get("profile_far")),
                         _fmt(entry.get("interval_f1")),
                         _fmt(entry.get("interval_iou")),
                         _fmt(entry.get("interval_coverage")),
@@ -458,8 +494,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, default=1, help="Dataset seeds per SNR point.")
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs.")
     parser.add_argument("--seed", type=int, default=2024, help="Base simulation seed.")
+    parser.add_argument(
+        "--defect-jitter",
+        type=float,
+        default=None,
+        help="Per-pass defect frequency jitter (0 = fixed morphology).",
+    )
     parser.add_argument("--skip-existing", action="store_true", help="Reuse finished metrics.")
+    parser.add_argument(
+        "--reuse-checkpoints",
+        action="store_true",
+        help="Skip training when a checkpoint exists but always re-evaluate.",
+    )
     parser.add_argument("--analyze-only", action="store_true", help="Only replot summary.json.")
+    parser.add_argument(
+        "--reparse",
+        action="store_true",
+        help="Rebuild summary.csv/json and the figure from the per-point metrics files.",
+    )
     args = parser.parse_args(argv)
 
     config_path = Path(args.config)
@@ -472,7 +524,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     models = list(dict.fromkeys(args.models))
     alpha = float(base.get("evaluation", {}).get("conformal_alpha", 0.05))
 
-    if not args.analyze_only:
+    if args.reparse:
+        results: dict[float, dict[str, dict[str, Any]]] = {}
+
+        def _read_runs(directory: Path) -> dict[str, dict[str, Any]]:
+            found: dict[str, dict[str, Any]] = {}
+            for model in models:
+                metrics_path = directory / "predictions" / f"metrics_{model}.json"
+                if metrics_path.is_file():
+                    found[model] = parse_metrics(metrics_path)
+            return found
+
+        for snr in args.snr:
+            workdir = output_dir / snr_tag(snr)
+            seed_dirs = sorted(
+                (path for path in workdir.glob("seed_*") if path.is_dir()),
+                key=lambda path: path.name,
+            )
+            if seed_dirs:
+                per_repeat = [_read_runs(path) for path in seed_dirs]
+                per_repeat = [entry for entry in per_repeat if entry]
+                if per_repeat:
+                    results[snr] = aggregate_repeats(per_repeat)
+            else:
+                entry = _read_runs(workdir)
+                if entry:
+                    results[snr] = entry
+        if not results:
+            raise SystemExit(f"no metrics found under {output_dir}")
+    elif not args.analyze_only:
         results: dict[float, dict[str, dict[str, Any]]] = {}
         started = time.time()
         for snr in args.snr:
@@ -484,7 +564,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     workdir = workdir / f"seed_{repeat}"
                 workdir.mkdir(parents=True, exist_ok=True)
                 config = patch_config(
-                    base, workdir, snr=snr, seed=int(args.seed) + repeat
+                    base,
+                    workdir,
+                    snr=snr,
+                    seed=int(args.seed) + repeat,
+                    jitter=args.defect_jitter,
                 )
                 point_config = workdir / "config.yaml"
                 point_config.write_text(
@@ -498,13 +582,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         models=models,
                         epochs=args.epochs,
                         skip_existing=args.skip_existing,
+                        reuse_checkpoints=args.reuse_checkpoints,
                     )
                 )
             results[snr] = aggregate_repeats(per_repeat)
             for model in models:
                 entry = results[snr][model]
                 print(
-                    f"  {model:<20} window_auc={_fmt(entry.get('window_auc')):>7} "
+                    f"  {model:<20} channel_auc={_fmt(entry.get('channel_auc')):>7} "
                     f"profile_auc={_fmt(entry.get('profile_auc')):>7} "
                     f"interval_f1={_fmt(entry.get('interval_f1')):>7}"
                     + (f"  ERROR: {entry['error'][:120]}" if entry.get("error") else ""),
@@ -526,12 +611,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Console pivot table: rows SNR, columns model.
     header = "SNR(dB) | " + " | ".join(f"{model:>18}" for model in models)
-    print("\nWindow-level ROC AUC")
+    print("\nChannel-level ROC AUC (active windows)")
     print(header)
     print("-" * len(header))
     for snr in sorted(results):
         row = " | ".join(
-            f"{_fmt(results[snr].get(model, {}).get('window_auc')):>18}"
+            f"{_fmt(results[snr].get(model, {}).get('channel_auc')):>18}"
             for model in models
         )
         print(f"{snr:>7.0f} | {row}")

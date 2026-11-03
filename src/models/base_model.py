@@ -490,10 +490,17 @@ class BaseTorchModel(BaseModel):
 _SUPPORTED_MODELS = {
     "pca",
     "energy",
+    "bandpass",
+    "filterbank",
+    "kurtogram",
+    "bandselect",
+    "envspec",
+    "tftraj",
     "isolation_forest",
     "ae_1d",
     "stae_convlstm",
     "spatial_masked_ae",
+    "stft_ae",
 }
 
 
@@ -508,6 +515,34 @@ def _load_model_class(name: str) -> type[BaseModel]:
         from .energy import EnergyThresholdBaseline
 
         return EnergyThresholdBaseline
+    if name == "bandpass":
+        from .bandpass import BandEnergyBaseline
+
+        return BandEnergyBaseline
+    if name == "stft_ae":
+        from .stft_ae import STFTLogMagnitudeAE
+
+        return STFTLogMagnitudeAE
+    if name == "filterbank":
+        from .filterbank import FilterbankBaseline
+
+        return FilterbankBaseline
+    if name == "kurtogram":
+        from .kurtogram import KurtogramBaseline
+
+        return KurtogramBaseline
+    if name == "bandselect":
+        from .kurtogram import LoudestBandBaseline
+
+        return LoudestBandBaseline
+    if name == "envspec":
+        from .timescale import EnvelopeSpectrumBaseline
+
+        return EnvelopeSpectrumBaseline
+    if name == "tftraj":
+        from .timescale import TrajectoryBaseline
+
+        return TrajectoryBaseline
     if name == "isolation_forest":
         from .statistical import IsolationForestBaseline
 

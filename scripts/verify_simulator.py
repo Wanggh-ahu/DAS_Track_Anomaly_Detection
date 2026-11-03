@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.signal import butter, sosfiltfilt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -150,6 +151,44 @@ def main(argv: list[str] | None = None) -> int:
 
     if max(errors) > 1.0:
         raise AssertionError("processed SNR deviates from the requested value by > 1 dB")
+
+    # Spectrum check: with jitter disabled every pass must hit the nominal
+    # resonance, and with jitter enabled the peak must actually move.  Without
+    # this the "heterogeneous morphology" experiment could silently test nothing.
+    def _peak_hz(jitter: float, seed: int) -> float:
+        simulator = TrainPassSimulator(
+            SimulationConfig(
+                anomaly_type="resonance",
+                snr_db=40.0,
+                defect_frequency_jitter=jitter,
+                seed=seed,
+                n_channels=96,
+                duration_s=8.0,
+            )
+        )
+        data, labels, _ = simulator.simulate(anomaly=True)
+        channel = int(np.flatnonzero(labels)[0])
+        sos = butter(
+            4, [40.0, 400.0], btype="bandpass", fs=simulator.config.sampling_rate_hz, output="sos"
+        )
+        filtered = sosfiltfilt(sos, data[channel].astype(np.float64))
+        segment = filtered[300:2300]
+        spectrum = np.abs(np.fft.rfft(segment * np.hanning(segment.size)))
+        frequencies = np.fft.rfftfreq(segment.size, 1.0 / simulator.config.sampling_rate_hz)
+        return float(frequencies[int(np.argmax(spectrum))])
+
+    seeds = [args.seed + offset for offset in range(6)]
+    fixed_peaks = np.array([_peak_hz(0.0, seed) for seed in seeds])
+    jittered_peaks = np.array([_peak_hz(0.4, seed) for seed in seeds])
+    print(
+        f"defect peak: fixed {fixed_peaks.min():.0f}-{fixed_peaks.max():.0f} Hz, "
+        f"jittered {jittered_peaks.min():.0f}-{jittered_peaks.max():.0f} Hz"
+    )
+    if fixed_peaks.std() > 1.5:
+        raise AssertionError("jitter=0 should keep a single defect frequency")
+    if jittered_peaks.std() < 4.0:
+        raise AssertionError("jitter=0.4 should spread the defect frequency")
+
     print("simulator checks passed")
     return 0
 

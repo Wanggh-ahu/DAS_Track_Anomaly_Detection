@@ -39,6 +39,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.evaluation import (  # noqa: E402
     AnomalyScorer,
     aggregate_channel_profile,
+    compute_roc_auc,
     detection_metrics_by_source,
     evaluate_all,
     interval_metrics_by_source,
@@ -100,12 +101,58 @@ class EvaluationData:
     sampling_rate_hz: float
     channel_spacing_m: float
     files: list[Path]
+    pass_labels: np.ndarray | None = None
 
     def __len__(self) -> int:
         return int(self.data.shape[0])
 
 
-def load_evaluation_data(root: str | Path, limit: int | None = None) -> EvaluationData:
+def _window_activity_fraction(payload: Any, default_fs: float) -> float | None:
+    """Fraction of a window covered by the defect's active time ranges.
+
+    Copying the pass-level label onto every window makes ~65 % of the positive
+    windows contain no defect at all, which caps the achievable ROC AUC at
+    roughly the duty cycle (0.68 for a 1.6 s defect in an 8 s pass).  The
+    simulator records the exact active ranges, so the window label can instead
+    say whether this window actually overlaps the defect.
+    """
+
+    if "metadata" not in payload:
+        return None
+    try:
+        metadata = json.loads(str(payload["metadata"]))
+    except (ValueError, TypeError):
+        return None
+    source_metadata = metadata.get("source_metadata") or {}
+    defect = source_metadata.get("defect") or {}
+    ranges = defect.get("active_time_ranges_s") or []
+    if not ranges:
+        return None
+    event = metadata.get("event") or {}
+    start = event.get("window_start_sample")
+    stop = event.get("window_end_sample")
+    if start is None or stop is None:
+        return None
+    fs = float(metadata.get("sampling_rate_hz") or default_fs)
+    window_start = float(start) / fs
+    window_stop = float(stop) / fs
+    span = max(window_stop - window_start, 1e-9)
+    covered = 0.0
+    for bounds in ranges:
+        try:
+            range_start, range_stop = float(bounds[0]), float(bounds[1])
+        except (TypeError, IndexError, ValueError):
+            continue
+        covered += max(0.0, min(window_stop, range_stop) - max(window_start, range_start))
+    return max(0.0, min(covered / span, 1.0))
+
+
+def load_evaluation_data(
+    root: str | Path,
+    limit: int | None = None,
+    window_label_mode: str = "pass",
+    activity_overlap: float = 0.3,
+) -> EvaluationData:
     """Load processed windows, preserving labels when they are available."""
 
     root = Path(root)
@@ -122,6 +169,7 @@ def load_evaluation_data(root: str | Path, limit: int | None = None) -> Evaluati
     arrays: list[np.ndarray] = []
     channel_labels: list[np.ndarray] = []
     sample_labels: list[int] = []
+    pass_labels: list[int] = []
     sources: list[str] = []
     expected_shape: tuple[int, int] | None = None
     sampling_rate = 1000.0
@@ -171,6 +219,17 @@ def load_evaluation_data(root: str | Path, limit: int | None = None) -> Evaluati
                     if "is_anomaly" in payload
                     else int(labels.any())
                 )
+                if str(window_label_mode).lower() == "activity" and flag:
+                    fraction = _window_activity_fraction(payload, sampling_rate)
+                    if fraction is not None:
+                        flag = int(fraction >= float(activity_overlap))
+                pass_labels.append(
+                    int(
+                        _extract_scalar(payload["is_anomaly"], int(labels.any()))
+                        if "is_anomaly" in payload
+                        else int(labels.any())
+                    )
+                )
                 fs = (
                     float(_extract_scalar(payload["sampling_rate_hz"], sampling_rate))
                     if "sampling_rate_hz" in payload
@@ -214,6 +273,7 @@ def load_evaluation_data(root: str | Path, limit: int | None = None) -> Evaluati
         sampling_rate_hz=sampling_rate,
         channel_spacing_m=spacing,
         files=files,
+        pass_labels=np.asarray(pass_labels, dtype=np.uint8),
     )
 
 
@@ -344,16 +404,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         test_dir = (
             resolve_path(args.test_dir) if args.test_dir else processed_root / "test"
         )
-        dataset = load_evaluation_data(test_dir, limit=args.limit)
+        evaluation_cfg = config.get("evaluation", {})
+        dataset = load_evaluation_data(
+            test_dir,
+            limit=args.limit,
+            window_label_mode=str(evaluation_cfg.get("window_labels", "pass")),
+            activity_overlap=float(evaluation_cfg.get("activity_overlap", 0.3)),
+        )
         LOGGER.info(
-            "Loaded %d test windows from %d source(s); shape=%s fs=%.2f Hz",
+            "Loaded %d test windows from %d source(s); shape=%s fs=%.2f Hz "
+            "window labels=%s (%d positive windows)",
             len(dataset),
             len(np.unique(dataset.sources)),
             dataset.data.shape[1:],
             dataset.sampling_rate_hz,
+            evaluation_cfg.get("window_labels", "pass"),
+            int(dataset.sample_labels.sum()),
         )
-
-        evaluation_cfg = config.get("evaluation", {})
         scorer_state = metadata.get("scorer") or {}
         scorer = AnomalyScorer(
             model,
@@ -427,6 +494,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         metrics: dict[str, Any] = {}
         if dataset.has_labels:
+            # Window labels describe whether the defect is *active* in a window;
+            # pass-level metrics must still use the pass label, otherwise a pass
+            # whose defect falls between two windows would be scored as normal.
+            pass_labels = (
+                dataset.pass_labels
+                if dataset.pass_labels is not None
+                else dataset.sample_labels
+            )
             tolerance_channels = int(
                 evaluation_cfg.get("localization_tolerance_channels", 2)
             )
@@ -438,6 +513,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 channel_scores=channel_scores,
                 channel_spacing_m=dataset.channel_spacing_m,
                 tolerance_channels=tolerance_channels,
+            )
+            # Channel-level detection: rank the defect channels above the healthy
+            # ones *inside the same window*.  Window-level AUC is confounded here
+            # because a defect is excited exactly when an axle passes, so active
+            # windows are also the loudest windows; comparing channels within a
+            # window removes that shared energy term, which is why an energy-only
+            # detector cannot game it.
+            active_windows = dataset.sample_labels.astype(bool)
+            if active_windows.any() and bool(dataset.channel_labels.any()):
+                metrics["channel_auc"] = float(
+                    compute_roc_auc(
+                        dataset.channel_labels[active_windows].ravel(),
+                        channel_scores[active_windows].ravel(),
+                    )
+                )
+                metrics["channel_auc_active_windows"] = int(active_windows.sum())
+            metrics["window_label_mode"] = str(
+                evaluation_cfg.get("window_labels", "pass")
             )
             localization_aggregation = str(
                 evaluation_cfg.get("localization_aggregation", "vote")
@@ -461,7 +554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             pass_threshold = metadata.get("pass_threshold")
             metrics["detection_by_source"] = detection_metrics_by_source(
-                dataset.sample_labels,
+                pass_labels,
                 sample_scores,
                 dataset.sources,
                 score_aggregation=source_score_aggregation,
@@ -499,10 +592,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 metrics.get("roc_auc", float("nan")),
                 metrics.get("f1", float("nan")),
                 metrics.get("false_alarm_rate", float("nan")),
-                metrics.get("localization", {}).get(
-                    "mean_error_channels", float("nan")
-                ),
+                metrics.get(
+                    "localization", {}
+                ).get("mean_error_channels", float("nan")),
             )
+            if metrics.get("channel_auc") is not None:
+                experiment.info(
+                    "Channel-level ROC AUC=%.4f over %d active window(s)",
+                    metrics["channel_auc"],
+                    metrics.get("channel_auc_active_windows", 0),
+                )
+            if str(evaluation_cfg.get("window_labels", "pass")).lower() == "activity":
+                LOGGER.warning(
+                    "Window-level ROC AUC uses activity labels: active windows coincide "
+                    "with axle passages, so the value is confounded by background energy "
+                    "and is NOT comparable with pass-mode runs. Quote channel_auc "
+                    "(=%.4f) instead.",
+                    metrics.get("channel_auc", float("nan")),
+                )
             pass_detection = metrics["detection_by_source"]
             experiment.info(
                 "Pass-level detection: ROC AUC=%.4f F1=%.4f "
@@ -525,16 +632,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 statistic="topk_mean",
                 topk=3,
             )
+            profile_threshold = metadata.get("profile_threshold")
             metrics["detection_by_source_profile"] = detection_metrics_by_source(
-                dataset.sample_labels,
+                pass_labels,
                 [profile_scores[str(source)] for source in dataset.sources],
                 dataset.sources,
                 score_aggregation="mean",
+                threshold=(
+                    float(profile_threshold) if profile_threshold is not None else None
+                ),
             )
             profile_detection = metrics["detection_by_source_profile"]
             experiment.info(
-                "Pass-level profile detection: ROC AUC=%.4f over %d source(s)",
+                "Pass-level profile detection: ROC AUC=%.4f F1=%.4f FAR=%.4f "
+                "recall=%.4f over %d source(s)",
                 profile_detection.get("roc_auc", float("nan")),
+                profile_detection.get("f1", float("nan")),
+                profile_detection.get("false_alarm_rate", float("nan")),
+                profile_detection.get("recall", float("nan")),
                 profile_detection.get("n_sources", 0),
             )
             experiment.info(

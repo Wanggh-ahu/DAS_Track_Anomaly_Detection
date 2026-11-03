@@ -59,10 +59,13 @@ model:
   candidates:
   - pca
   - energy
+  - bandpass
+  - filterbank
   - isolation_forest
   - ae_1d
   - stae_convlstm
   - spatial_masked_ae
+  - stft_ae
   params:
     pca:
       n_components: 32
@@ -70,6 +73,20 @@ model:
     energy:
       topk_channels: 3
       statistic: mean
+    bandpass:
+      band_hz: [80.0, 160.0]
+      frame_length: 32
+      statistic: max
+    filterbank:
+      frame_length: 32
+      statistic: max
+      band_aggregation: mean
+    stft_ae:
+      n_fft: 64
+      hop_length: 8
+      base_channels: 16
+      latent_channels: 8
+      epochs: 40
     isolation_forest:
       n_estimators: 200
       contamination: 0.02
@@ -98,6 +115,9 @@ model:
 evaluation:
   threshold_method: conformal
   conformal_alpha: 0.05
+  pass_conformal_alpha: 0.10   # pass level supports ~0.10 at n=21, not 0.05
+  window_labels: activity      # label a window only if the defect is active in it
+  activity_overlap: 0.30       # fraction of the window that must overlap the defect
   calibration_split: 0.35
   threshold_percentile: 99.0
   fixed_threshold: null

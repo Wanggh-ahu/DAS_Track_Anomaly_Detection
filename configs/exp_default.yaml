@@ -65,10 +65,13 @@ model:
   candidates:
     - pca
     - energy
+    - bandpass
+    - filterbank
     - isolation_forest
     - ae_1d
     - stae_convlstm
     - spatial_masked_ae
+    - stft_ae
   params:
     pca:
       n_components: 32
@@ -76,6 +79,20 @@ model:
     energy:
       topk_channels: 3
       statistic: mean
+    bandpass:
+      band_hz: [80.0, 160.0]
+      frame_length: 32
+      statistic: max
+    filterbank:
+      frame_length: 32
+      statistic: max
+      band_aggregation: mean
+    stft_ae:
+      n_fft: 64
+      hop_length: 8
+      base_channels: 16
+      latent_channels: 8
+      epochs: 40
     isolation_forest:
       n_estimators: 200
       contamination: 0.02
@@ -105,6 +122,13 @@ model:
 evaluation:
   threshold_method: conformal   # conformal | percentile | fixed
   conformal_alpha: 0.05         # guaranteed false-alarm rate (needs n >= 1/alpha - 1)
+  # The pass level has ~20 calibration units, not ~1000, so it cannot support the
+  # same alpha: at n=21, alpha=0.05 makes the conformal quantile the sample
+  # maximum, and the detector then fails to fire in ~1/3 of calibration draws.
+  # 0.10 is the smallest target the sample size actually supports here.
+  pass_conformal_alpha: 0.10
+  window_labels: activity      # label a window only if the defect is active in it
+  activity_overlap: 0.30       # fraction of the window covering the defect
   calibration_split: 0.30       # fraction of normal passes held out for calibration
   threshold_percentile: 99.0    # used when threshold_method=percentile
   fixed_threshold: null

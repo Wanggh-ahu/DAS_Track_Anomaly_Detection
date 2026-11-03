@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.evaluation import (  # noqa: E402
     AnomalyScorer,
     conformal_threshold_report,
+    pass_profile_scores,
     select_threshold,
     split_conformal_quantile,
 )
@@ -454,11 +455,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "No disjoint calibration split available; calibrating on training "
                 "windows (the false-alarm guarantee does not hold)"
             )
+        # Optional post-training calibration of the residual on clean windows.
+        # Models that expose it (the spectrogram autoencoder) use the same
+        # disjoint split as the conformal thresholds.  Off by default: it buys
+        # ranking accuracy but its heavier score tail makes the pass-level
+        # conformal threshold (which at n=21 is the sample maximum) unusable --
+        # see the report before enabling.
+        calibrate = getattr(model, "calibrate_normal", None)
+        if callable(calibrate) and bool(
+            evaluation_cfg.get("residual_calibration", False)
+        ):
+            calibrate(calibration_source, sampling_rate_hz=dataset.sampling_rate_hz)
+            LOGGER.info(
+                "Calibrated residual statistics on %d clean windows",
+                calibration_source.shape[0],
+            )
         scorer.fit(calibration_source)
         normal_scores = scorer.sample_scores(calibration_source)
 
         threshold_method = str(evaluation_cfg.get("threshold_method", "conformal"))
         conformal_alpha = float(evaluation_cfg.get("conformal_alpha", 0.05))
+        # The pass level has tens of calibration units, not thousands, so the
+        # same alpha is not supportable there: at n=21 and alpha=0.05 the
+        # conformal quantile *is* the sample maximum and the detector fails to
+        # fire in a third of calibration draws (see reports/snr_benchmark.md).
+        pass_alpha = float(
+            evaluation_cfg.get("pass_conformal_alpha", conformal_alpha)
+        )
         fixed_threshold = evaluation_cfg.get("fixed_threshold")
         if threshold_method == "fixed" and fixed_threshold is None:
             LOGGER.warning("fixed_threshold is null; falling back to percentile threshold")
@@ -507,6 +530,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         pass_score_aggregation = str(
             evaluation_cfg.get("source_score_aggregation", "mean")
         ).lower()
+        localization_aggregation = str(
+            evaluation_cfg.get("localization_aggregation", "mean")
+        ).lower()
         pass_reducer = {
             "mean": np.mean,
             "median": np.median,
@@ -529,7 +555,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if normal_pass_scores:
                 if threshold_method == "conformal":
                     pass_conformal = split_conformal_quantile(
-                        normal_pass_scores, alpha=conformal_alpha
+                        normal_pass_scores, alpha=pass_alpha
                     )
                     pass_threshold = pass_conformal.threshold
                     LOGGER.info(
@@ -538,6 +564,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                         len(normal_pass_scores),
                         pass_conformal.reason,
                     )
+                    # `1/alpha` calibration units is enough for the guarantee to
+                    # hold *on average*; ~`5/alpha` is what makes the threshold
+                    # stable enough that the realised false-alarm rate does not
+                    # swing by a factor of two between retrainings.  Measured in
+                    # reports/snr_benchmark.md §3.
+                    recommended = int(round(5.0 / max(pass_alpha, 1e-6)))
+                    if len(normal_pass_scores) < recommended:
+                        LOGGER.warning(
+                            "Only %d calibration passes for pass-level alpha=%.2f; "
+                            "about %d are needed for a stable threshold "
+                            "(the realised false-alarm rate currently varies by "
+                            "+- %.2f between draws)",
+                            len(normal_pass_scores),
+                            pass_alpha,
+                            recommended,
+                            1.0 / max(len(normal_pass_scores), 1),
+                        )
                 else:
                     margin = max(
                         float(evaluation_cfg.get("pass_threshold_margin", 0.01)), 0.0
@@ -549,6 +592,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                         max(normal_pass_scores),
                         margin,
                     )
+
+        # Time-integrated pass score: aggregate the channel profile over the
+        # whole pass and keep the strongest channels.  It is the primary metric
+        # for transient defects, so it needs its own conformal threshold on the
+        # calibration passes; otherwise its F1/recall would be reported at a
+        # threshold chosen on the test set.
+        profile_threshold = None
+        profile_conformal = None
+        if pass_reducer is not None and normal_pass_scores:
+            profile_calibration = pass_profile_scores(
+                scorer.channel_scores(calibration_source),
+                calibration_sources,
+                aggregation=localization_aggregation,
+                statistic="topk_mean",
+                topk=3,
+            )
+            profile_pass_scores = [
+                float(profile_calibration[str(source)])
+                for source in np.unique(calibration_sources)
+            ]
+            if profile_pass_scores:
+                profile_conformal = split_conformal_quantile(
+                    profile_pass_scores, alpha=pass_alpha
+                )
+                profile_threshold = profile_conformal.threshold
+                LOGGER.info(
+                    "Profile threshold (conformal): %.6f over %d passes | %s",
+                    profile_threshold,
+                    len(profile_pass_scores),
+                    profile_conformal.reason,
+                )
 
         checkpoint_dir = (
             resolve_path(args.checkpoint_dir)
@@ -573,6 +647,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "input_shape": list(train_data.shape[1:]),
             "threshold": threshold,
             "pass_threshold": pass_threshold,
+            "profile_threshold": profile_threshold,
             "threshold_method": threshold_method,
             "pass_score_aggregation": pass_score_aggregation,
             "normal_pass_scores": normal_pass_scores,

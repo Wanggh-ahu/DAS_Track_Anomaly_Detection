@@ -15,6 +15,15 @@ track-defect responses are supported:
     hanging sleeper, ballast void).  It lasts longer than an impact and carries
     narrow-band energy at the local structural resonance.
 
+``click`` / ``chirp`` / ``impulse_train`` / ``am_resonance``
+    Out-of-family morphologies used to test whether a conclusion survives
+    defects that were not designed alongside the detectors.  A click is a ~2 ms
+    broadband pulse, far too short to carry three carriers.  A chirp sweeps
+    across the band instead of sitting in it.  An impulse train repeats at the
+    wheel-rotation rate, which breaks the "one response per axle crossing"
+    structure entirely (wheel flat, corrugation).  An amplitude-modulated ring
+    puts sidebands around a carrier where the harmonic model has one line.
+
 Both mechanisms are *additive* responses of the defect.  There is deliberately
 no gain multiplication of existing channels: amplifying a channel is a sensor
 fault, not a track defect, and it trivialises detection.
@@ -44,7 +53,17 @@ from scipy.signal import butter, sosfilt
 
 LOGGER = logging.getLogger(__name__)
 
-VALID_ANOMALY_TYPES = ("impact", "resonance", "mixed", "none")
+VALID_ANOMALY_TYPES = (
+    "impact",
+    "resonance",
+    "mixed",
+    "none",
+    # Out-of-family morphologies; see the module docstring.
+    "click",
+    "chirp",
+    "impulse_train",
+    "am_resonance",
+)
 
 
 @dataclass
@@ -77,6 +96,36 @@ class SimulationConfig:
     resonance_decay_s: float = 0.075
     resonance_harmonic_ratio: float = 0.35
     resonance_harmonic_multiplier: float = 1.45
+    # ------------------------------------------------- families we did not fit
+    # The impact and resonance atoms above were designed by us, so any detector
+    # that assumes them is being tested on its own assumptions.  The four
+    # morphologies below are deliberately *outside* that family: a click is too
+    # short to have three carriers, a chirp moves in frequency, an impulse train
+    # repeats at the wheel-rotation rate instead of once per axle, and an
+    # amplitude-modulated ring has sidebands where the harmonic model has a
+    # single line.
+    click_duration_s: float = 0.0022
+    click_frequency_hz: float = 130.0
+    chirp_duration_s: float = 0.050
+    chirp_start_ratio: float = 0.55
+    chirp_end_ratio: float = 1.60
+    impulse_train_rate_hz: float = 9.0
+    impulse_train_count: int = 5
+    impulse_train_width_s: float = 0.012
+    am_modulation_hz: float = 22.0
+    am_depth: float = 0.70
+    # Per-pass multiply of every defect frequency (log-uniform in
+    # ``[1 - j, 1 + j]``).  ``0`` keeps a single, fixed morphology; a positive
+    # value makes the defect band vary from pass to pass, which is what decides
+    # whether a *fixed* band-pass filter is genuinely matched or merely lucky.
+    defect_frequency_jitter: float = 0.0
+    # Probability that a defective pass carries a *second* defect at a disjoint
+    # channel range and a different frequency.  This exists to make frequency
+    # selectivity measurable: detecting two defects needs only "something is
+    # wrong", telling them apart needs an actual spectral estimate.
+    defect_secondary_probability: float = 0.0
+    defect_secondary_frequency_hz: float = 150.0
+    defect_secondary_channel_gap: int = 20
 
     # ---------------------------------------- SNR reference (mirror data.*)
     snr_reference: str = "processed"
@@ -107,6 +156,8 @@ class TrainPassSimulator:
         # Exact (channel, sample) support of the most recent defect; exposed for
         # verification tooling rather than serialised into the metadata.
         self.last_support_: np.ndarray | None = None
+        # Per-pass multiplier applied to every defect frequency (1.0 = nominal).
+        self._frequency_scale: float = 1.0
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "TrainPassSimulator":
@@ -265,7 +316,7 @@ class TrainPassSimulator:
         envelope = np.exp(-np.square(t / sigma)) + 0.30 * np.exp(
             -t / max(cfg.impact_decay_s, 1e-4)
         )
-        carriers = np.asarray(cfg.impact_carriers_hz, dtype=float)
+        carriers = np.asarray(cfg.impact_carriers_hz, dtype=float) * self._frequency_scale
         wave = np.zeros_like(t)
         for index, frequency in enumerate(carriers):
             wave += np.sin(2.0 * np.pi * frequency * t + 0.9 * index)
@@ -289,12 +340,13 @@ class TrainPassSimulator:
             return atom
         t = tau[active]
         envelope = np.exp(-t / max(cfg.resonance_decay_s, 1e-4))
-        wave = np.sin(2.0 * np.pi * cfg.resonance_frequency_hz * t) + (
+        base_frequency = cfg.resonance_frequency_hz * self._frequency_scale
+        wave = np.sin(2.0 * np.pi * base_frequency * t) + (
             cfg.resonance_harmonic_ratio
             * np.sin(
                 2.0
                 * np.pi
-                * cfg.resonance_frequency_hz
+                * base_frequency
                 * cfg.resonance_harmonic_multiplier
                 * t
                 + 0.7
@@ -303,14 +355,126 @@ class TrainPassSimulator:
         atom[active] = envelope * wave
         return atom
 
+    def _click_atom(self, tau: np.ndarray) -> np.ndarray:
+        """Very short broadband pulse: one carrier, ~2 ms.
+
+        The impact atom spends 18 ms across three carriers, which is what makes
+        an 80-160 Hz window a *matched* filter for it.  A 2 ms pulse has a
+        spectral width of several hundred Hz, so no narrow window is matched to
+        it and its energy is diluted instead of concentrated.
+        """
+
+        cfg = self.config
+        atom = np.zeros_like(tau)
+        duration = max(float(cfg.click_duration_s), 1e-4)
+        active = (tau >= 0.0) & (tau <= 5.0 * duration)
+        if not active.any():
+            return atom
+        t = tau[active]
+        sigma = duration / 2.5
+        envelope = np.exp(-np.square(t / sigma))
+        frequency = float(cfg.click_frequency_hz) * self._frequency_scale
+        atom[active] = envelope * np.sin(2.0 * np.pi * frequency * t)
+        return atom
+
+    def _chirp_atom(self, tau: np.ndarray) -> np.ndarray:
+        """Linearly swept tone: the defect band moves *during* the response."""
+
+        cfg = self.config
+        atom = np.zeros_like(tau)
+        duration = max(float(cfg.chirp_duration_s), 1e-4)
+        active = (tau >= 0.0) & (tau <= duration)
+        if not active.any():
+            return atom
+        t = tau[active]
+        base = float(cfg.resonance_frequency_hz) * self._frequency_scale
+        start = base * float(cfg.chirp_start_ratio)
+        end = base * float(cfg.chirp_end_ratio)
+        # Instantaneous frequency f(t) = start + (end - start) * t / T, so the
+        # phase is the integral of it; the Hann window keeps the endpoints from
+        # splattering energy across the whole band.
+        sweep = (end - start) / duration
+        phase = 2.0 * np.pi * (start * t + 0.5 * sweep * np.square(t))
+        envelope = np.square(np.sin(np.pi * t / duration))
+        atom[active] = envelope * np.sin(phase)
+        return atom
+
+    def _impulse_train_atom(self, tau: np.ndarray) -> np.ndarray:
+        """Periodic impacts at the wheel-rotation rate (wheel flat, corrugation).
+
+        This is the one morphology that is structurally different rather than
+        merely different: the response does not stop after one crossing, it
+        repeats, so its envelope carries a line spectrum instead of a single
+        transient.  No existing detector models periodicity.
+        """
+
+        cfg = self.config
+        atom = np.zeros_like(tau)
+        rate = max(float(cfg.impulse_train_rate_hz), 1e-3)
+        count = max(int(cfg.impulse_train_count), 1)
+        period = 1.0 / rate
+        width = max(float(cfg.impulse_train_width_s), 1e-4)
+        base = float(cfg.resonance_frequency_hz) * self._frequency_scale
+        horizon = period * (count - 1) + 4.0 * width
+        active = (tau >= 0.0) & (tau <= horizon)
+        if not active.any():
+            return atom
+        t = tau[active]
+        train = np.zeros_like(t)
+        sigma = width / 2.5
+        for index in range(count):
+            local = t - index * period
+            gate = local >= 0.0
+            if not gate.any():
+                continue
+            # Each repeat is slightly weaker, as a real wheel flat is.
+            weight = 0.82**index
+            train[gate] += weight * np.exp(-np.square(local[gate] / sigma)) * np.sin(
+                2.0 * np.pi * base * local[gate]
+            )
+        atom[active] = train
+        return atom
+
+    def _am_resonance_atom(self, tau: np.ndarray) -> np.ndarray:
+        """Carrier with amplitude sidebands where ``resonance`` has a harmonic."""
+
+        cfg = self.config
+        atom = np.zeros_like(tau)
+        horizon = 6.0 * max(cfg.resonance_decay_s, 1e-4)
+        active = (tau >= 0.0) & (tau <= horizon)
+        if not active.any():
+            return atom
+        t = tau[active]
+        carrier = np.sin(
+            2.0 * np.pi * float(cfg.resonance_frequency_hz) * self._frequency_scale * t
+        )
+        modulation = 1.0 + float(cfg.am_depth) * np.cos(
+            2.0 * np.pi * float(cfg.am_modulation_hz) * t
+        )
+        atom[active] = np.exp(-t / max(cfg.resonance_decay_s, 1e-4)) * carrier * modulation
+        return atom
+
     def _defect_component(
         self,
         profile: np.ndarray,
         crossings: Sequence[tuple[float, int]],
+        frequency_scale: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]]]:
         """Additive defect response, its support mask and active time ranges."""
 
         cfg = self.config
+        if frequency_scale is None:
+            jitter = float(getattr(cfg, "defect_frequency_jitter", 0.0) or 0.0)
+            if jitter > 0.0:
+                # Log-uniform: scaling a spectrum up by 30 % and down by 30 %
+                # should be equally likely, and the pass-level distribution
+                # stays centred on the nominal morphology.
+                span = float(np.log1p(min(jitter, 0.9)))
+                self._frequency_scale = float(np.exp(self.rng.uniform(-span, span)))
+            else:
+                self._frequency_scale = 1.0
+        else:
+            self._frequency_scale = float(frequency_scale)
         time = np.arange(self.n_samples, dtype=np.float64) / cfg.sampling_rate_hz
         component = np.zeros((cfg.n_channels, self.n_samples), dtype=np.float64)
         support = np.zeros((cfg.n_channels, self.n_samples), dtype=bool)
@@ -321,6 +485,14 @@ class TrainPassSimulator:
             chemical = np.zeros(self.n_samples, dtype=np.float64)
             if cfg.anomaly_type in {"impact", "mixed"}:
                 chemical += self._impact_atom(tau)
+            elif cfg.anomaly_type == "click":
+                chemical += self._click_atom(tau)
+            elif cfg.anomaly_type == "chirp":
+                chemical += self._chirp_atom(tau)
+            elif cfg.anomaly_type == "impulse_train":
+                chemical += self._impulse_train_atom(tau)
+            elif cfg.anomaly_type == "am_resonance":
+                chemical += self._am_resonance_atom(tau)
             if cfg.anomaly_type in {"resonance", "mixed"}:
                 chemical += self._resonance_atom(tau)
             if not np.any(chemical):
@@ -508,31 +680,88 @@ class TrainPassSimulator:
 
         if anomaly and cfg.anomaly_type != "none":
             profile, centre_channel = self._resolve_profile(anomaly_channels)
-            defect_position_m = float(centre_channel) * cfg.channel_spacing_m
-            crossings = self._axle_crossings(defect_position_m)
-            if not crossings:
-                LOGGER.warning(
-                    "Defect at channel %.1f is never crossed by an axle; "
-                    "pass will be labelled normal",
-                    centre_channel,
+            regions = self._plan_defect_regions(profile, centre_channel)
+            combined = np.zeros((cfg.n_channels, self.n_samples), dtype=np.float64)
+            combined_support = np.zeros((cfg.n_channels, self.n_samples), dtype=bool)
+            region_infos: list[dict[str, Any]] = []
+            all_ranges: list[tuple[float, float]] = []
+            for index, region in enumerate(regions):
+                position_m = float(region["centre"]) * cfg.channel_spacing_m
+                crossings = self._axle_crossings(position_m)
+                if not crossings:
+                    LOGGER.warning(
+                        "Defect at channel %.1f is never crossed by an axle; "
+                        "skipping this site",
+                        region["centre"],
+                    )
+                    continue
+                component, support, active_ranges = self._defect_component(
+                    region["profile"], crossings, region["frequency_scale"]
                 )
-            component, support, active_ranges = self._defect_component(profile, crossings)
-            if np.any(component):
+                if not np.any(component):
+                    continue
+                # Every site is scaled to the same local SNR on its own, so a
+                # two-defect pass cannot be solved by relative loudness.
                 component, snr_info = self._scale_to_snr(component, field, support)
-                field = field + component
-                labels[profile > 0.35] = 1
+                combined += component
+                combined_support |= support
+                labels[region["profile"] > 0.35] = 1
+                all_ranges.extend(active_ranges)
+                region_infos.append(
+                    {
+                        "site": index,
+                        "defect_centre_channel": float(region["centre"]),
+                        "defect_channels": np.flatnonzero(region["profile"] > 0.35)
+                        .astype(int)
+                        .tolist(),
+                        "frequency_scale": float(region["frequency_scale"]),
+                        "resonance_frequency_hz": float(
+                            region["base_frequency_hz"] * region["jitter"]
+                        ),
+                        "impact_carriers_hz": [
+                            float(value)
+                            * region["frequency_scale"]
+                            * region["base_frequency_hz"]
+                            / float(cfg.resonance_frequency_hz)
+                            for value in cfg.impact_carriers_hz
+                        ],
+                        "axle_crossing_times_s": [float(t) for t, _ in crossings],
+                        "active_time_ranges_s": [
+                            [float(start), float(stop)] for start, stop in active_ranges
+                        ],
+                        **snr_info,
+                    }
+                )
+            merged: list[tuple[float, float]] = []
+            for start, stop in sorted(all_ranges):
+                if merged and start <= merged[-1][1] + 1e-9:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], stop))
+                else:
+                    merged.append((start, stop))
+            if region_infos:
+                field = field + combined
                 injected = True
-                self.last_support_ = support
+                self.last_support_ = combined_support
+                primary = region_infos[0]
                 defect_info = {
                     "anomaly_type": cfg.anomaly_type,
-                    "defect_centre_channel": float(centre_channel),
-                    "defect_channels": np.flatnonzero(profile > 0.35).astype(int).tolist(),
-                    "axle_crossing_times_s": [float(t) for t, _ in crossings],
-                    "active_time_ranges_s": [
-                        [float(start), float(stop)] for start, stop in active_ranges
+                    "defect_centre_channel": primary["defect_centre_channel"],
+                    "defect_channels": [
+                        channel for info in region_infos for channel in info["defect_channels"]
                     ],
+                    "axle_crossing_times_s": primary["axle_crossing_times_s"],
+                    "frequency_scale": primary["frequency_scale"],
+                    "resonance_frequency_hz": primary["resonance_frequency_hz"],
+                    "impact_carriers_hz": primary["impact_carriers_hz"],
+                    "active_time_ranges_s": [
+                        [float(start), float(stop)] for start, stop in merged
+                    ],
+                    # One entry per defect site; the attribution benchmark reads
+                    # ``defect_channels`` and ``resonance_frequency_hz`` here.
+                    "regions": region_infos,
+                    "n_sites": len(region_infos),
                     "injected": True,
-                    **snr_info,
+                    **{k: v for k, v in primary.items() if k.startswith("snr")},
                 }
             else:
                 defect_info = {
@@ -562,6 +791,82 @@ class TrainPassSimulator:
             },
         }
         return field.astype(np.float32), labels, metadata
+
+    def _plan_defect_regions(
+        self, profile: np.ndarray, centre: float
+    ) -> list[dict[str, Any]]:
+        """Decide how many defect sites this pass carries.
+
+        RNG discipline: with the default (zero) secondary probability nothing
+        beyond the primary frequency scale is drawn, so previously generated
+        datasets reproduce bit for bit.
+        """
+
+        cfg = self.config
+        jitter = float(getattr(cfg, "defect_frequency_jitter", 0.0) or 0.0)
+        span = float(np.log1p(min(jitter, 0.9))) if jitter > 0.0 else 0.0
+
+        def draw_scale() -> float:
+            if span <= 0.0:
+                return 1.0
+            return float(np.exp(self.rng.uniform(-span, span)))
+
+        nominal = float(cfg.resonance_frequency_hz)
+        primary_jitter = draw_scale()
+        regions: list[dict[str, Any]] = [
+            {
+                "profile": profile,
+                "centre": float(centre),
+                "base_frequency_hz": nominal,
+                "jitter": primary_jitter,
+                "frequency_scale": primary_jitter,
+            }
+        ]
+
+        probability = float(getattr(cfg, "defect_secondary_probability", 0.0) or 0.0)
+        if probability <= 0.0:
+            return regions
+        if self.rng.random() >= probability:
+            return regions
+
+        secondary_hz = float(
+            getattr(cfg, "defect_secondary_frequency_hz", 150.0) or 150.0
+        )
+        width = int(
+            self.rng.integers(
+                cfg.anomaly_min_width_channels, cfg.anomaly_max_width_channels + 1
+            )
+        )
+        gap = int(getattr(cfg, "defect_secondary_channel_gap", 20))
+        candidates = [centre + gap, centre - gap]
+        if self.rng.random() < 0.5:
+            candidates.reverse()
+        half_width = max(width / 2.0, 0.5)
+        primary_channels = profile > 0.35
+        for candidate in candidates:
+            if not 0.0 <= candidate <= cfg.n_channels - 1:
+                continue
+            secondary = self._raised_cosine_profile(
+                cfg.n_channels, float(candidate), half_width
+            )
+            if not np.any(secondary > 0.35):
+                continue
+            if np.any(secondary[primary_channels] > 0.05):
+                continue
+            secondary_jitter = draw_scale()
+            regions.append(
+                {
+                    "profile": secondary,
+                    "centre": float(candidate),
+                    "base_frequency_hz": secondary_hz,
+                    "jitter": secondary_jitter,
+                    # Atoms are driven by one multiplier relative to the nominal
+                    # morphology, so shift *and* jitter fold into it.
+                    "frequency_scale": (secondary_hz / nominal) * secondary_jitter,
+                }
+            )
+            break
+        return regions
 
     def _resolve_profile(
         self, anomaly_channels: Sequence[int] | None
